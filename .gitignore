@@ -1,0 +1,14 @@
+
+# Other files and folders
+.settings/
+.vscode/
+
+*.pyc
+*.egg-info/
+build/
+dist/
+
+.DS_Store
+.env
+.venv/
+system_soc/
