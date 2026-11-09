@@ -1,0 +1,5 @@
+ectool==1.2.1
+pyserial
+py7zr
+requests
+cstruct

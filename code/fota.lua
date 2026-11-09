@@ -1,104 +1,87 @@
-# LuatOS Air780EG FUFU FOTA (Firmware Over-The-Air)
--- FOTA update support using LuatOS OTA server
+-- fota.lua - remote update for the tracker (firmware + script) via libfota2
+-- Real API: libfota2.request(cbFnc, opts) - the callback comes first, and
+-- opts.project_key defaults to the global PRODUCT_KEY. There is no ota.check()
+-- and no ota.install() in LuatOS.
 
--- Configuration
--- Make sure PRODUCT_KEY is set in projectConfig.lua or .env
--- Register your product at iot.openluat.com to enable FOTA
+local M = { available = false }
 
-local M = {}
+local PLACEHOLDER = "YOUR_64_CHARACTER_PRODUCT_KEY_HERE"
 
--- Check for firmware update
-function M.check_update()
-    -- Check if we have a valid product key
-    if not _G.PRODUCT_KEY or _G.PRODUCT_KEY == "YOUR_64_CHARACTER_PRODUCT_KEY_HERE" then
-        log.info("FOTA", "No product key configured, skipping FOTA check")
+local ok, libfota2 = pcall(require, "libfota2")
+if ok and libfota2 then
+    M.lib = libfota2
+    M.available = true
+end
+
+local RESULT_TEXT = {
+    [0] = "success, rebooting",
+    [1] = "connection failed, check url or server",
+    [2] = "url error",
+    [3] = "server closed the connection",
+    [4] = "bad response body: empty package, 4xx/5xx, or already up to date",
+    [5] = "PRODUCT_KEY missing, or VERSION is not XXX.YYY.ZZZ",
+}
+
+local function network_ready()
+    if socket and socket.adapter then
+        return socket.adapter() and true or false
+    end
+    return false
+end
+
+-- Reference implementation of the result callback (0..5)
+function M.on_result(ret)
+    log.info("FOTA", "result", ret, RESULT_TEXT[ret] or "unknown")
+    if ret == 0 then
+        log.info("FOTA", "download finished, rebooting to install")
+        rtos.reboot()
+    end
+end
+
+-- Single update check. Returns false when the check cannot even start.
+function M.check(timeout_ms)
+    if not M.available then
+        log.info("FOTA", "libfota2 not in this build, skipped")
         return false
     end
-    
-    -- LuatOS OTA check
-    -- This uses the built-in ota API
-    local ok, err = pcall(function()
-        -- ota.check() - checks for updates on OTA server
-        -- Returns: true/false, version string, or error
-        local result = ota.check()
-        if result then
-            log.info("FOTA", "Update available:", result)
-            return true
-        else
-            log.info("FOTA", "No update available")
-            return false
+    if not _G.PRODUCT_KEY or _G.PRODUCT_KEY == PLACEHOLDER then
+        log.info("FOTA", "PRODUCT_KEY not configured, skipped")
+        return false
+    end
+    if not network_ready() then
+        log.info("FOTA", "network not ready, skipped")
+        return false
+    end
+
+    log.info("FOTA", "checking, current version", _G.VERSION)
+    local started, err = pcall(M.lib.request, M.on_result, {
+        project_key = _G.PRODUCT_KEY,
+        timeout = timeout_ms or 120000, -- library default is 300000 ms
+    })
+    if not started then
+        log.error("FOTA", "request failed", err)
+        return false
+    end
+    return true
+end
+
+-- Periodic check; default is every 6 hours
+function M.auto_check(interval_ms)
+    if not M.available then
+        return
+    end
+    local interval = interval_ms or 6 * 3600 * 1000
+    sys.taskInit(function()
+        sys.wait(interval)
+        while true do
+            M.check()
+            sys.wait(interval)
         end
     end)
-    
-    if not ok then
-        log.info("FOTA", "FOTA check error:", err)
-    end
-    
-    return ok
 end
 
--- Download and install firmware update
-function M.download_and_install()
-    if not _G.PRODUCT_KEY then
-        log.info("FOTA", "No product key, cannot download FOTA")
-        return false
-    end
-    
-    log.info("FOTA", "Starting FOTA download...")
-    
-    -- Start FOTA download
-    -- This will download the firmware package from OTA server
-    local ok, err = pcall(function()
-        ota.install()
-    end)
-    
-    if ok then
-        log.info("FOTA", "FOTA update completed, device will restart")
-        -- Device will automatically restart after OTA install
-        return true
-    else
-        log.info("FOTA", "FOTA update failed:", err)
-        return false
-    end
-end
-
--- Get current firmware version
-function M.get_current_version()
-    -- Try to get version from system
-    local version = _G.VERSION or "unknown"
-    -- Can also check sys.info() for more details
-    local sys_info = sys.info()
-    if sys_info and sys_info.work_version then
-        version = sys_info.work_version
-    end
-    return version
-end
-
--- Main FOTA check function (call periodically)
-function M.periodic_check()
-    -- Check for updates every N minutes/hours
-    -- Can be called from main loop or scheduled task
-    local current_version = M.get_current_version()
-    log.info("FOTA", "Current version:", current_version)
-    
-    if M.check_update() then
-        -- Optionally ask user or auto-download
-        -- For trackers, maybe auto-download during idle time
-        log.info("FOTA", "Update found, initiating download...")
-        M.download_and_install()
-    else
-        log.info("FOTA", "No update at this time")
-    end
-end
-
--- Initialize FOTA support
-function M.init()
-    log.info("FOTA", "FOTA support initialized")
-    log.info("FOTA", "Product Key:", _G.PRODUCT_KEY)
-    log.info("FOTA", "Current Version:", M.get_current_version())
-    
-    -- Perform initial check
-    M.check_update()
+function M.version()
+    return _G.VERSION or "unknown"
 end
 
 return M
